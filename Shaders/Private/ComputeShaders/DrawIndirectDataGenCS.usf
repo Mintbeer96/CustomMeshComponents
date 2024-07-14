@@ -1,0 +1,48 @@
+﻿#include "/Engine/Private/Common.ush"
+RWBuffer<float4> RWOutputPositionBuffer;
+RWBuffer<uint> RWOutputArgs;
+//
+Texture2D InputTexture;
+SamplerState InputTexSampler;
+float Threshold;
+// We first read the data map, probably a texture for example.
+// First step is easy, we sample the texture. Lets say our texture is 1:1 now.
+
+//For demo will use 4x4 matrix.
+int Dither(int X, int Y, float SampleValue, float Threshold)
+{
+	float4x4 DitherMatrix = float4x4(0, 8, 2, 10,12, 4, 14, 6,3, 11, 1, 9, 15, 7, 13, 5);
+	int Sample_x = int(X % 4);
+	int Sample_y = int(Y % 4);
+
+	float Matrix_Sample = DitherMatrix[Sample_x][Sample_y] / 16.0f;
+	float ClampSample = clamp(SampleValue, 0, 1);
+	return ClampSample * Matrix_Sample > Threshold ? 1 : 0;
+	
+}
+
+//This is the thread count.
+//Then we have group count. So we need control over that as well.
+[numthreads(BUFFER_SAMPLE_X, BUFFER_SAMPLE_Y,1)]
+void MainCS(
+	uint Gid : SV_GroupIndex,
+	uint3 DTid : SV_DispatchThreadID)
+{
+	// GroupMemoryBarrierWithGroupSync();
+	// if(DTid.x == 0 && DTid.y == 0)
+	// {
+		//Use this function to atomically set value across compute threads.
+		// uint PlaceHolder = 0;
+		// InterlockedCompareExchange(RWOutputArgs[0], 256, 0, PlaceHolder);
+	// }
+	int2 IntXY = int2(int(DTid.x % 16.0f), int(DTid.y % 16.0f));
+	
+	float2 UV = float2( IntXY.x, IntXY.y) / 16.0f;
+	float4 SampleValue = InputTexture.SampleLevel(InputTexSampler, UV, 0);
+	if(Dither(IntXY.x, IntXY.y, SampleValue.r, Threshold))
+	{
+		uint WriteIndex = 0;
+		InterlockedAdd(RWOutputArgs[0], 1, WriteIndex);
+		RWOutputPositionBuffer[WriteIndex] = float4(IntXY.x * 100.f,IntXY.y * 100.f, 0, 1);
+	}
+}

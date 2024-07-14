@@ -1,0 +1,252 @@
+﻿#include "/Engine/Private/VertexFactoryCommon.ush"
+
+/**
+ * 定义输入VS的数据布局，需要匹配C++端FVertexFactory里的数据类型。注意这里的顺序和InitRHI里面的顺序一致。
+ * 例如这个对应的输入，C++代码在InitRHI里如下：
+ * 
+ */
+struct FVertexFactoryInput
+{
+    float4    Position    : ATTRIBUTE0;
+
+    float4 InstanceData0 : ATTRIBUTE8;
+    float4 InstanceData1 : ATTRIBUTE9; 
+
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    uint PrimitiveId : ATTRIBUTE13;
+#endif
+};
+
+
+struct FPositionOnlyVertexFactoryInput
+{
+    float4    Position    : ATTRIBUTE0;
+
+    float4 InstanceData0 : ATTRIBUTE8;
+    float4 InstanceData1 : ATTRIBUTE9; 
+
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    uint PrimitiveId : ATTRIBUTE1;
+#endif
+};
+
+struct FPositionAndNormalOnlyVertexFactoryInput
+{
+    float4    Position    : ATTRIBUTE0;
+    float4    Normal        : ATTRIBUTE2;
+
+    float4 InstanceData0 : ATTRIBUTE8;
+    float4 InstanceData1 : ATTRIBUTE9; 
+
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    uint PrimitiveId : ATTRIBUTE1;
+#endif
+};
+
+
+
+
+struct FVertexFactoryIntermediates
+{
+    float3 OriginalWorldPos;
+    
+    uint PrimitiveId;
+};
+
+// VS插值到PS的结构体。
+struct FVertexFactoryInterpolantsVSToPS
+{
+#if NUM_TEX_COORD_INTERPOLATORS
+    float4    TexCoords[(NUM_TEX_COORD_INTERPOLATORS+1)/2] : TEXCOORD0;
+#endif
+
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    nointerpolation uint PrimitiveId : PRIMITIVE_ID;
+#endif
+
+#if INSTANCED_STEREO
+    nointerpolation uint EyeIndex : PACKED_EYE_INDEX;
+#endif
+};
+
+uint GetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    return Interpolants.PrimitiveId;
+#else
+    return 0;
+#endif
+}
+
+void SetPrimitiveId(inout FVertexFactoryInterpolantsVSToPS Interpolants, uint PrimitiveId)
+{
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    Interpolants.PrimitiveId = PrimitiveId;
+#endif
+}
+
+#if NUM_TEX_COORD_INTERPOLATORS
+float2 GetUV(FVertexFactoryInterpolantsVSToPS Interpolants, int UVIndex)
+{
+    float4 UVVector = Interpolants.TexCoords[UVIndex / 2];
+    return UVIndex % 2 ? UVVector.zw : UVVector.xy;
+}
+
+void SetUV(inout FVertexFactoryInterpolantsVSToPS Interpolants, int UVIndex, float2 InValue)
+{
+    FLATTEN
+    if (UVIndex % 2)
+    {
+        Interpolants.TexCoords[UVIndex / 2].zw = InValue;
+    }
+    else
+    {
+        Interpolants.TexCoords[UVIndex / 2].xy = InValue;
+    }
+}
+#endif
+
+FMaterialPixelParameters GetMaterialPixelParameters(FVertexFactoryInterpolantsVSToPS Interpolants, float4 SvPosition)
+{
+    // GetMaterialPixelParameters is responsible for fully initializing the result
+    FMaterialPixelParameters Result = MakeInitializedMaterialPixelParameters();
+
+#if NUM_TEX_COORD_INTERPOLATORS
+    UNROLL
+    for (int CoordinateIndex = 0; CoordinateIndex < NUM_TEX_COORD_INTERPOLATORS; CoordinateIndex++)
+    {
+        Result.TexCoords[CoordinateIndex] = GetUV(Interpolants, CoordinateIndex);
+    }
+#endif    //NUM_MATERIAL_TEXCOORDS
+
+    Result.TwoSidedSign = 1;
+    Result.PrimitiveId = GetPrimitiveId(Interpolants);
+
+    return Result;
+}
+
+FMaterialVertexParameters GetMaterialVertexParameters(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 WorldPosition, half3x3 TangentToLocal)
+{
+    FMaterialVertexParameters Result = (FMaterialVertexParameters)0;
+    
+    Result.WorldPosition = WorldPosition;
+    Result.TangentToWorld = float3x3(1,0,0,0,1,0,0,0,1);
+    Result.PreSkinnedPosition = Input.Position.xyz;
+    Result.PreSkinnedNormal = float3(0,0,1);
+
+#if NUM_MATERIAL_TEXCOORDS_VERTEX
+    UNROLL
+    for(int CoordinateIndex = 0; CoordinateIndex < NUM_MATERIAL_TEXCOORDS_VERTEX; CoordinateIndex++)
+    {
+        Result.TexCoords[CoordinateIndex] = Intermediates.MorphedWorldPosRaw.xy;
+    }
+#endif  //NUM_MATERIAL_TEXCOORDS_VERTEX
+
+    return Result;
+}
+
+FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput Input)
+{
+    FVertexFactoryIntermediates Intermediates;
+
+    // Get the packed instance data
+    float4 Data0 = Input.InstanceData0;
+    float4 Data1 = Input.InstanceData1;
+
+    const float3 Translation = Data0.xyz;
+    const float3 Scale = float3(Data1.zw, 1.0f);
+    const uint PackedDataChannel = asuint(Data1.x);
+
+    // Lod level is in first 8 bits and ShouldMorph bit is in the 9th bit
+    const float LODLevel = (float)(PackedDataChannel & 0xFF);
+    const uint ShouldMorph = ((PackedDataChannel >> 8) & 0x1); 
+
+    // Calculate the world pos
+    Intermediates.OriginalWorldPos = float3(Input.Position.xy, 0.0f) * Scale + Translation;
+
+#if VF_USE_PRIMITIVE_SCENE_DATA
+    Intermediates.PrimitiveId = Input.PrimitiveId;
+#else
+    Intermediates.PrimitiveId = 0;
+#endif
+
+    return Intermediates;
+}
+
+half3x3 VertexFactoryGetTangentToLocal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+    return half3x3(1,0,0,0,1,0,0,0,1);
+}
+
+float4 VertexFactoryGetRasterizedWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float4 InWorldPosition)
+{
+    return InWorldPosition;
+}
+
+float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, float3 TranslatedWorldPosition)
+{
+    return TranslatedWorldPosition;
+}
+
+FVertexFactoryInterpolantsVSToPS VertexFactoryGetInterpolantsVSToPS(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates, FMaterialVertexParameters VertexParameters)
+{
+    FVertexFactoryInterpolantsVSToPS Interpolants;
+
+    Interpolants = (FVertexFactoryInterpolantsVSToPS)0;
+
+#if NUM_TEX_COORD_INTERPOLATORS
+    float2 CustomizedUVs[NUM_TEX_COORD_INTERPOLATORS];
+    GetMaterialCustomizedUVs(VertexParameters, CustomizedUVs);
+    GetCustomInterpolators(VertexParameters, CustomizedUVs);
+    
+    UNROLL
+    for (int CoordinateIndex = 0; CoordinateIndex < NUM_TEX_COORD_INTERPOLATORS; CoordinateIndex++)
+    {
+        SetUV(Interpolants, CoordinateIndex, CustomizedUVs[CoordinateIndex]);
+    }
+#endif
+
+#if INSTANCED_STEREO
+    Interpolants.EyeIndex = 0;
+#endif
+
+    SetPrimitiveId(Interpolants, Intermediates.PrimitiveId);
+
+    return Interpolants;
+}
+
+float4 VertexFactoryGetWorldPosition(FPositionOnlyVertexFactoryInput Input)
+{
+    return Input.Position;
+}
+
+float4 VertexFactoryGetPreviousWorldPosition(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+    float4x4 PreviousLocalToWorldTranslated = GetPrimitiveData(Intermediates.PrimitiveId).PreviousLocalToWorld;
+    PreviousLocalToWorldTranslated[3][0] += ResolvedView.PrevPreViewTranslation.x;
+    PreviousLocalToWorldTranslated[3][1] += ResolvedView.PrevPreViewTranslation.y;
+    PreviousLocalToWorldTranslated[3][2] += ResolvedView.PrevPreViewTranslation.z;
+
+    return mul(Input.Position, PreviousLocalToWorldTranslated);
+}
+
+float4 VertexFactoryGetTranslatedPrimitiveVolumeBounds(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+    float4 ObjectWorldPositionAndRadius = GetPrimitiveData(GetPrimitiveId(Interpolants)).ObjectWorldPositionAndRadius;
+    return float4(ObjectWorldPositionAndRadius.xyz + ResolvedView.PreViewTranslation.xyz, ObjectWorldPositionAndRadius.w);
+}
+
+uint VertexFactoryGetPrimitiveId(FVertexFactoryInterpolantsVSToPS Interpolants)
+{
+    return GetPrimitiveId(Interpolants);
+}
+
+float3 VertexFactoryGetWorldNormal(FPositionAndNormalOnlyVertexFactoryInput Input)
+{
+    return Input.Normal.xyz;
+}
+
+float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
+{
+    return float3(0.0f, 0.0f, 1.0f);
+}

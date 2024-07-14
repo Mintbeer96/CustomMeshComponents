@@ -1,0 +1,152 @@
+﻿#include "/Engine/Private/Common.ush"
+
+//Output
+RWBuffer<float4> RWInstanceOriginBuffer;
+RWBuffer<float4> RWInstanceTransformBuffer;
+RWBuffer<uint> RWCSInstanceArgs;
+
+Texture2D DepthTexture;
+SamplerState DepthTexSampler;
+//Input
+float4 ViewLocation;
+float4x4 WorldToClip;
+float3 ComponentLocation;
+RWBuffer<uint> RWGenCSInstanceCount;
+Buffer<float4> PossibleInstancePos;
+
+bool IsInClipSpace(float4 clipSpacePosition)
+{
+	return clipSpacePosition.x > -clipSpacePosition.w && clipSpacePosition.x < clipSpacePosition.w&&
+		clipSpacePosition.y > -clipSpacePosition.w && clipSpacePosition.y < clipSpacePosition.w&&
+		clipSpacePosition.z > 0 && clipSpacePosition.z < clipSpacePosition.w;
+}
+
+bool FrustumCulling(float3 InstanceLocalCenter)
+{
+	//1. Get NDC coord for local primitive instance center.
+	//float4x4 WorldToClip = ResolvedView.WorldToClip;
+
+	const float4 HomoInstanceCenter = float4(InstanceLocalCenter + ComponentLocation, 1);
+	
+	//Simple clipping frustum culling check.
+	const float4 ClipPosition = mul(HomoInstanceCenter, WorldToClip);
+	
+	//2. Compare NDC Position with the frustum planes.
+	bool result = true;
+
+	// Might be wrong need to calculate.
+	//Get NDC Position
+	//float4 NDCPosition = ClipPosition / ClipPosition.w;
+	// //Left
+	// result = result && (WorldToClip[0][0] + WorldToClip[3][0])*NDCPosition.x + (WorldToClip[0][1] + WorldToClip[3][1])*NDCPosition.y + (WorldToClip[0][2] + WorldToClip[3][2])*NDCPosition.z + (WorldToClip[0][3] + WorldToClip[3][3])>0;
+	//
+	// //Right
+	// result = result && (WorldToClip[3][0] - WorldToClip[0][0])*NDCPosition.x + (WorldToClip[3][1] - WorldToClip[0][1])*NDCPosition.y + (WorldToClip[3][2] - WorldToClip[0][2])*NDCPosition.z + (WorldToClip[3][3] - WorldToClip[0][3])>0;
+	//
+	// //Top
+	// result = result && (WorldToClip[3][0] - WorldToClip[1][0])*NDCPosition.x + (WorldToClip[3][1] - WorldToClip[1][1])*NDCPosition.y + (WorldToClip[3][2] - WorldToClip[1][2])*NDCPosition.z + (WorldToClip[3][3] - WorldToClip[1][3])>0;
+	//
+	// //Down
+	// result = result && (WorldToClip[1][0] + WorldToClip[3][0])*NDCPosition.x + (WorldToClip[1][1] + WorldToClip[3][1])*NDCPosition.y + (WorldToClip[1][2] + WorldToClip[3][2])*NDCPosition.z + (WorldToClip[1][3] + WorldToClip[3][3])>0;
+	//
+	// //Near
+	// result = result && (WorldToClip[2][0] + WorldToClip[3][0])*NDCPosition.x + (WorldToClip[2][1] + WorldToClip[3][1])*NDCPosition.y + (WorldToClip[2][2] + WorldToClip[3][2])*NDCPosition.z + (WorldToClip[2][3] + WorldToClip[3][3])>0;
+	//
+	// //Far
+	// result = result && (WorldToClip[2][0] + WorldToClip[3][0])*NDCPosition.x + (WorldToClip[2][1] + WorldToClip[3][1])*NDCPosition.y + (WorldToClip[2][2] + WorldToClip[3][2])*NDCPosition.z + (WorldToClip[2][3] + WorldToClip[3][3])>0;
+
+	result = IsInClipSpace(ClipPosition);
+	
+	return result;
+}
+
+// also see ConvertToDeviceZ()
+// @param DeviceZ value that is stored in the depth buffer (Z/W)
+// @return SceneDepth (linear in world units, W)
+float MyConvertFromDeviceZ(float DeviceZ)
+{
+	float4 InvDeviceZToWorldZTransform;
+	InvDeviceZToWorldZTransform[0] = 0.0f;
+	InvDeviceZToWorldZTransform[1] = 0.0f;
+	InvDeviceZToWorldZTransform[2] = 1.0f / WorldToClip[3][2];
+	InvDeviceZToWorldZTransform[3] = WorldToClip[2][2] / WorldToClip[3][2];
+	// Supports ortho and perspective, see CreateInvDeviceZToWorldZTransform()
+	return DeviceZ * InvDeviceZToWorldZTransform[0] + InvDeviceZToWorldZTransform[1] + 1.0f / (DeviceZ * InvDeviceZToWorldZTransform[2] - InvDeviceZToWorldZTransform[3]);
+}
+   // View.InvDeviceZToWorldZTransform[0] = 0.0f
+   // View.InvDeviceZToWorldZTransform[1] = 0.0f
+   // View.InvDeviceZToWorldZTransform[2] = 1.0f / ProjMatrix.M[3][2]
+   // View.InvDeviceZToWorldZTransform[3] = ProjMatrix.M[2][2] / ProjMatrix.M[3][2]
+
+
+bool OcclusionCulling(float3 InstanceLocalCenter)
+{
+	// float3 InstanceWorldPos = InstanceLocalCenter + ComponentLocation;
+	bool result = true;
+	const float4 HomoInstanceCenter = float4(InstanceLocalCenter + ComponentLocation, 1);
+	
+	//Simple clipping frustum culling check.
+	const float4 ClipPosition = mul(HomoInstanceCenter, WorldToClip);
+	float4 NDCPosition = ClipPosition/ClipPosition.w;
+	NDCPosition = (NDCPosition + float4(1.f, 1.f, 0.f,0.f))/2.f;
+	float2 UV = NDCPosition.xy;
+	
+	//Depth sampled.
+	float DepthFromTex = DepthTexture.SampleLevel( DepthTexSampler, UV.xy, 0).r;
+	
+	if(DepthFromTex > NDCPosition.z)
+	{
+		result = false;
+	}
+	return result;
+}
+
+bool DistanceCulling(float3 InstanceLocalCenter)
+{
+	//
+	bool result = true;
+	float d = distance(ViewLocation ,InstanceLocalCenter + ComponentLocation);
+	if(d > 20000.0f)
+	{
+		result = false;
+	}
+	return result;
+	// return TaskIndex % 2 == 0;
+}
+
+[numthreads(BUFFER_GEN_THREAD_COUNT,1,1)]
+void MainCS(uint TaskIndex : SV_DispatchThreadID)
+{
+	// if(TaskIndex == 0)
+	// {
+	// 	//Use this function to atomically set value across compute threads.
+	// 	uint PlaceHolder = 0;
+	// 	InterlockedExchange(RWCSInstanceArgs[0], 0, PlaceHolder);
+	// }
+	
+	// GroupMemoryBarrierWithGroupSync();
+	if(TaskIndex < RWGenCSInstanceCount[0] )
+	{
+		//First we calculate all desirable positions according to the culling.
+		//TODO: Fix this since we are culling different item every time, so this causes flickering.
+		float4 PossiblePosition = PossibleInstancePos[TaskIndex];
+		//Assign Instance Origin for passed frustum culling test.
+		
+		
+		if(DistanceCulling(PossiblePosition.xyz))
+		if(FrustumCulling(PossiblePosition.xyz))
+		{
+			if(OcclusionCulling(PossiblePosition.xyz))
+			{
+				//Add to count buffer. The InterlockedAdd will return 
+				uint WriteIndex;
+				InterlockedAdd(RWCSInstanceArgs[0], 1, WriteIndex);
+			 
+				RWInstanceOriginBuffer[WriteIndex] = PossiblePosition;
+				RWInstanceTransformBuffer[WriteIndex * 3 + 0] = float4(1, 0, 0, 0);
+				RWInstanceTransformBuffer[WriteIndex * 3 + 1] = float4(0, 1, 0, 0);
+				RWInstanceTransformBuffer[WriteIndex * 3 + 2] = float4(0, 0, 1, 0);
+			}
+		}
+	}
+}

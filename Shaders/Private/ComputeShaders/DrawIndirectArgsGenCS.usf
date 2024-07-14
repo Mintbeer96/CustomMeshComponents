@@ -1,0 +1,27 @@
+﻿#include "/Engine/Private/Common.ush"
+
+// NumIndicesPerInstance
+// InstanceCount;
+// StartIndexLocation
+// BaseVertexLocation
+// StartInstanceLocation
+
+RWBuffer<uint> RWDrawIndirectArgs;
+uint NumIndicesPerInstance;
+
+//Fix 2023/11/05 we need to set 0 when dispatching the drawindirect task. Hack here since we only have one task.
+RWBuffer<uint> RWCountBeforeCulling;
+RWBuffer<uint> RWInstanceArgs;
+
+[numthreads(ARGS_GEN_THREAD_COUNT,1,1)]
+void MainCS(uint TaskIndex : SV_DispatchThreadID)
+{
+	RWDrawIndirectArgs[0] = NumIndicesPerInstance;
+	RWDrawIndirectArgs[1] = RWInstanceArgs[0];// why always overflow
+	RWDrawIndirectArgs[2] = 0;
+	RWDrawIndirectArgs[3] = 0;
+	RWDrawIndirectArgs[4] = 0;
+
+	RWInstanceArgs[0] = 0;
+	RWCountBeforeCulling[0] = 0;
+}
